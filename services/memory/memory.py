@@ -253,7 +253,7 @@ class MemoryStore:
 
     def store_event(self, event: TrackEvent) -> None:
         """Store an event in a Redis list (ring buffer)."""
-        key = f"events:{event.track_id}"
+        key = f"events:{event.camera_id}:{event.track_id}"
         self._r.lpush(key, event.model_dump_json())
         self._r.ltrim(key, 0, MAX_EVENTS_PER_TRACK - 1)
         self._r.expire(key, EVENT_TTL_SECONDS)
@@ -263,9 +263,9 @@ class MemoryStore:
         self._r.sadd(cam_key, event.track_id)
         self._r.expire(cam_key, EVENT_TTL_SECONDS)
 
-    def get_sequence(self, track_id: int, last_n: Optional[int] = None) -> TrackSequence:
+    def get_sequence(self, track_id: int, camera_id: str, last_n: Optional[int] = None) -> TrackSequence:
         """Retrieve the sequence of events for a track."""
-        key = f"events:{track_id}"
+        key = f"events:{camera_id}:{track_id}"
         raw_events = self._r.lrange(key, 0, -1)
         
         events = []
@@ -282,9 +282,9 @@ class MemoryStore:
             zones_visited=list(set(e.zone for e in events if e.zone))
         )
 
-    def get_zone_entry_count(self, track_id: int, zone: str) -> int:
+    def get_zone_entry_count(self, track_id: int, camera_id: str, zone: str) -> int:
         """Count how many times a track entered a specific zone."""
-        seq = self.get_sequence(track_id)
+        seq = self.get_sequence(track_id, camera_id)
         return sum(1 for e in seq.events if e.zone == zone)
 
     def get_active_track_ids(self, camera_id: str) -> set[int]:
@@ -293,6 +293,6 @@ class MemoryStore:
         ids = self._r.smembers(key)
         return {int(i) for i in ids}
 
-    def expire_track(self, track_id: int) -> None:
+    def expire_track(self, track_id: int, camera_id: str) -> None:
         """Explicitly remove track data."""
-        self._r.delete(f"events:{track_id}")
+        self._r.delete(f"events:{camera_id}:{track_id}")

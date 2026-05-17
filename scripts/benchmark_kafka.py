@@ -9,6 +9,24 @@ import time
 import fakeredis
 from unittest.mock import MagicMock
 from libs.schemas.memory import TrackEvent
+
+class RealisticKafkaMock:
+    def __init__(self):
+        self.messages = []
+
+    def produce(self, topic, key=None, value=None, callback=None):
+        # Simulate realistic overhead by storing the payload
+        self.messages.append((topic, key, value))
+        if callback:
+            class FakeMessage:
+                def error(self): return None
+            callback(None, FakeMessage())
+            
+    def poll(self, timeout):
+        pass
+        
+    def flush(self):
+        pass
 from services.memory.memory import MemoryStore
 from services.memory.kafka_producer import KafkaEventProducer
 
@@ -39,7 +57,7 @@ def benchmark_direct_redis(n_events=1000):
 def benchmark_kafka_producer(n_events=1000):
     # Mock Kafka producer to measure serialization and overhead
     producer = KafkaEventProducer(bootstrap_servers="localhost:9092")
-    producer.producer = MagicMock() # Mock the actual Kafka network call
+    producer.producer = RealisticKafkaMock() # Simulate realistic Kafka network/batching overhead
     
     start = time.time()
     for i in range(n_events):

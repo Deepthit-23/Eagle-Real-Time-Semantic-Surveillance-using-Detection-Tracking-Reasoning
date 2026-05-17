@@ -24,7 +24,7 @@ class KafkaEventConsumer:
             'bootstrap.servers': self.bootstrap_servers,
             'group.id': self.group_id,
             'auto.offset.reset': 'earliest',
-            'enable.auto.commit': True
+            'enable.auto.commit': False
         }
         
         try:
@@ -55,13 +55,18 @@ class KafkaEventConsumer:
                         logger.error(f"Consumer error: {msg.error()}")
                         break
 
-                self._process_message(msg, store)
+                success = self._process_message(msg, store)
+                if success:
+                    try:
+                        self.consumer.commit(message=msg, asynchronous=False)
+                    except Exception as e:
+                        logger.error(f"Failed to commit message offset: {e}")
         except KeyboardInterrupt:
             pass
         finally:
             self.consumer.close()
 
-    def _process_message(self, msg, store: MemoryStore):
+    def _process_message(self, msg, store: MemoryStore) -> bool:
         """Process a single Kafka message."""
         try:
             data = json.loads(msg.value().decode('utf-8'))
@@ -74,10 +79,12 @@ class KafkaEventConsumer:
             # setnx returns True if the key was set (didn't exist)
             if not store._r.set(dedupe_key, "1", nx=True, ex=600): # 10 min TTL
                 logger.debug(f"Duplicate event ignored: {dedupe_key}")
-                return
+                return True
 
             # Store in Redis via MemoryStore
             store.store_event(event)
+            return True
 
         except Exception as e:
             logger.error(f"Failed to process message: {e}")
+            return False

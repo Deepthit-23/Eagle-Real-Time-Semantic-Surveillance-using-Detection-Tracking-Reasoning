@@ -53,7 +53,7 @@ def process_tracked_frame(tracked: TrackedFrame, store: MemoryStore) -> list[Tra
             confidence         = obj.confidence,
         )
 
-        if settings.use_kafka and _kafka_producer:
+        if settings.use_kafka and _kafka_producer and _kafka_producer.producer is not None:
             _kafka_producer.produce_event(event)
         else:
             store.store_event(event)
