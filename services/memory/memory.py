@@ -269,7 +269,7 @@ class MemoryStore:
     def _track_camera_key(self, track_id: int) -> str:
         return f"{self._prefix}:track_camera:{track_id}"
 
-    def store_event(self, evt: "TrackEvent") -> None:
+    def store_event(self, evt: TrackEvent) -> None:
         key = self._events_key(evt.track_id)
         # pydantic v2 uses `model_dump`; fall back to `dict()` if needed
         payload = evt.model_dump() if hasattr(evt, "model_dump") else evt.dict()
@@ -281,7 +281,7 @@ class MemoryStore:
         self._r.set(self._track_camera_key(evt.track_id), evt.camera_id)
         self._r.expire(key, TRACK_TTL_SECONDS)
 
-    def get_sequence(self, track_id: int, last_n: Optional[int] = None) -> "TrackSequence":
+    def get_sequence(self, track_id: int, last_n: Optional[int] = None) -> TrackSequence:
         key = self._events_key(track_id)
         raw = self._r.lrange(key, 0, -1)
         events: list[TrackEvent] = []
