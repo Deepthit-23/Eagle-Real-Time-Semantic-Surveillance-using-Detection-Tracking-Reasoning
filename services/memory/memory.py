@@ -36,6 +36,7 @@ from typing import Optional
 import numpy as np
 
 from libs.observability.metrics import redis_write_latency
+from libs.schemas.memory import ActionHint, TrackEvent, TrackSequence
 from libs.schemas.tracking import TrackLifecycleEvent, TrackState
 from services.tracking.cross_camera_reid import CrossCameraReID
 
@@ -289,7 +290,21 @@ class MemoryStore:
             events.append(TrackEvent(**data))
         if last_n is not None:
             events = events[-last_n:]
-        return TrackSequence(track_id=track_id, events=events)
+        # Populate summary fields expected by consumers/tests
+        camera_id = events[0].camera_id if events else "cam_01"
+        total_dwell = sum(e.dwell_time_seconds for e in events)
+        zones_visited: list[str] = []
+        for e in events:
+            if e.zone and e.zone not in zones_visited:
+                zones_visited.append(e.zone)
+
+        return TrackSequence(
+            track_id=track_id,
+            camera_id=camera_id,
+            events=events,
+            total_dwell=total_dwell,
+            zones_visited=zones_visited,
+        )
 
     def get_zone_entry_count(self, track_id: int, zone: str) -> int:
         seq = self.get_sequence(track_id)
