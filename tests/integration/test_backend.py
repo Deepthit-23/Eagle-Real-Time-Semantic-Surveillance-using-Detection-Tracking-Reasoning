@@ -12,6 +12,7 @@ Coverage
 - GET /tracks  → filters out non-ACTIVE tracks
 - GET /tracks  → respects camera_id query parameter
 - GET /tracks  → default camera_id is "cam_01"
+- GET /tracks  → rejects invalid camera_id (glob injection guard)
 
 All tests use ``httpx.AsyncClient`` with the ASGI transport so no real
 server or Redis instance is required.  Redis is replaced by fakeredis.
@@ -21,10 +22,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -33,7 +33,7 @@ httpx = pytest.importorskip("httpx")
 from httpx import ASGITransport, AsyncClient
 
 
-# ── App import (deferred so patches can be applied first) ─────────────────────
+# ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
 def fake_redis_client():
@@ -62,9 +62,8 @@ def app_without_redis():
     Return the FastAPI app with ``_get_redis`` patched to always return
     None, deterministically simulating an unreachable Redis server.
 
-    Patching the helper directly (rather than just setting ``_redis = None``)
-    prevents the lazy-init path from attempting a real Redis connection
-    during tests.
+    Patching the helper directly prevents the lazy-init path from
+    attempting a real Redis connection during tests.
     """
     import apps.backend.main as backend
 
@@ -100,7 +99,6 @@ async def test_health_ok_when_redis_connected(app_with_redis):
 async def test_health_degraded_when_redis_unavailable(app_without_redis):
     """
     /health must return {"status": "degraded"} when Redis is unreachable.
-    The ``_get_redis()`` helper returns None, so the endpoint short-circuits.
     """
     async with AsyncClient(
         transport=ASGITransport(app=app_without_redis), base_url="http://test"

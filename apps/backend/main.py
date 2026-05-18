@@ -16,6 +16,12 @@ GET /tracks?camera_id=cam_01
 
 GET /metrics
     Prometheus metrics scrape endpoint.
+
+Import note
+-----------
+Routers are imported with a try/except so this module works both when run
+from the project root (tests, local dev) and inside the Docker image where
+the build context is ``apps/backend/`` and only that directory is on sys.path.
 """
 from __future__ import annotations
 
@@ -25,12 +31,19 @@ import os
 import re
 
 import redis as redis_sync
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.responses import Response
 from prometheus_client import generate_latest
 
-from apps.backend.routes.cameras import identity_router, router as cameras_router
-from apps.backend.routes.feedback import router as feedback_router
+try:
+    # Inside Docker: build context is apps/backend/, only that dir is on sys.path.
+    from routes.cameras import identity_router, router as cameras_router
+    from routes.feedback import router as feedback_router
+except ModuleNotFoundError:
+    # From project root (tests, local dev): use the full package path.
+    from apps.backend.routes.cameras import identity_router, router as cameras_router  # noqa: F401
+    from apps.backend.routes.feedback import router as feedback_router  # noqa: F401
+
 from libs.observability.metrics import frames_processed_total
 
 logger = logging.getLogger(__name__)
@@ -58,11 +71,18 @@ def _get_redis() -> redis_sync.Redis | None:
     Return a lazily-initialised sync Redis client, or None if the connection
     has never succeeded.  Errors are logged but never raised — callers must
     handle a None return.
+
+    Both ``socket_connect_timeout`` and ``socket_timeout`` are set so a
+    stalled Redis server cannot block a worker indefinitely.
     """
     global _redis
     if _redis is None:
         try:
-            client = redis_sync.from_url(REDIS_URL, socket_connect_timeout=2)
+            client = redis_sync.from_url(
+                REDIS_URL,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
             client.ping()
             _redis = client
             logger.info("Redis connected at %s", REDIS_URL)
@@ -88,8 +108,8 @@ def health() -> dict:
     """
     Return server and Redis health.
 
-    Uses a synchronous handler to avoid blocking the event loop with
-    sync Redis calls (ping).
+    Synchronous handler — avoids blocking the event loop with sync Redis
+    calls (ping).
 
     Responses
     ---------
@@ -129,12 +149,12 @@ def list_active_tracks(
     """
     Return active track IDs for a camera.
 
-    Uses a synchronous handler to avoid blocking the event loop with
-    sync Redis calls (scan_iter, get).
+    Synchronous handler — avoids blocking the event loop with sync Redis
+    calls (scan_iter, get).
 
     Scans Redis for keys matching ``track:{camera_id}:*`` using a
-    cursor-based SCAN (O(1) per batch, safe for large keyspaces) and
-    returns the integer track IDs whose stored state is ``ACTIVE``.
+    cursor-based SCAN (safe for large keyspaces) and returns the integer
+    track IDs whose stored state is ``ACTIVE``.
 
     Query Parameters
     ----------------
@@ -171,6 +191,11 @@ def list_active_tracks(
                 logger.debug("Skipping corrupt record at key %s", key)
                 continue
 
+            # Guard against valid JSON that is not an object (e.g. list/string).
+            if not isinstance(record, dict):
+                logger.debug("Skipping non-object record at key %s", key)
+                continue
+
             if record.get("state") != "ACTIVE":
                 continue
 
@@ -185,6 +210,9 @@ def list_active_tracks(
 
     except Exception as exc:
         logger.error("Failed to list tracks for %s: %s", camera_id, exc)
+        # Reset stale client so the next request retries the connection.
+        global _redis
+        _redis = None
         return {"camera_id": camera_id, "track_ids": [], "error": str(exc)}
 
 
