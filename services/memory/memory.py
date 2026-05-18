@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 TRACK_TTL_SECONDS = 86_400  # 24 h — keep per-track state for a full day
 EVENT_TTL_SECONDS = 86_400
 
+# ── MemoryStore constants ─────────────────────────────────────────────────────
+MAX_EVENTS_PER_TRACK = 50   # ring-buffer cap per track_id
+
 
 class MemoryService:
     """
@@ -237,3 +240,143 @@ class MemoryService:
                 EVENT_TTL_SECONDS,
                 json.dumps(evts),
             )
+
+
+# ── MemoryStore ───────────────────────────────────────────────────────────────
+
+class MemoryStore:
+    """
+    Lightweight ring-buffer event store for per-track behavioural sequences.
+
+    Stores ``TrackEvent`` objects (Phase 3 schema) in Redis lists capped at
+    ``MAX_EVENTS_PER_TRACK`` entries.  Designed for the action-classifier →
+    VLM/LLM reasoning pipeline.
+
+    Redis key schema
+    ----------------
+    - ``seq:{camera_id}:{track_id}``      → JSON list of TrackEvent dicts
+    - ``zones:{camera_id}:{track_id}``    → Redis set of zone names visited
+    - ``zone_count:{camera_id}:{track_id}:{zone}`` → integer entry count
+    - ``active:{camera_id}``              → Redis set of active track_ids
+
+    Parameters
+    ----------
+    redis_client:
+        Connected ``redis.Redis`` (or FakeRedis for tests).
+    camera_id:
+        Default camera identifier used when none is supplied per-event.
+    """
+
+    def __init__(self, redis_client, camera_id: str = "cam_01") -> None:
+        self._r = redis_client
+        self._camera_id = camera_id
+
+    # ── Key helpers ───────────────────────────────────────────────────────────
+
+    def _seq_key(self, track_id: int) -> str:
+        return f"seq:{self._camera_id}:{track_id}"
+
+    def _zones_key(self, track_id: int) -> str:
+        return f"zones:{self._camera_id}:{track_id}"
+
+    def _zone_count_key(self, track_id: int, zone: str) -> str:
+        return f"zone_count:{self._camera_id}:{track_id}:{zone}"
+
+    def _active_key(self) -> str:
+        return f"active:{self._camera_id}"
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def store_event(self, event) -> None:
+        """
+        Append a ``TrackEvent`` to the ring buffer for its track.
+
+        Enforces the ``MAX_EVENTS_PER_TRACK`` cap by trimming the oldest
+        entry whenever the list exceeds the limit.  Also maintains the
+        zones-visited set, per-zone entry counts, and the active-tracks set.
+
+        Args:
+            event: ``TrackEvent`` instance (from ``libs.schemas.memory``).
+        """
+        from libs.schemas.memory import ActionHint
+
+        key = self._seq_key(event.track_id)
+        serialised = event.model_dump_json()
+
+        # Append and trim to ring-buffer size in a pipeline.
+        pipe = self._r.pipeline()
+        pipe.rpush(key, serialised)
+        pipe.ltrim(key, -MAX_EVENTS_PER_TRACK, -1)
+
+        # Track active IDs.
+        pipe.sadd(self._active_key(), str(event.track_id))
+
+        # Zone bookkeeping.
+        if event.zone:
+            pipe.sadd(self._zones_key(event.track_id), event.zone)
+            if event.action_hint == ActionHint.ZONE_ENTRY:
+                pipe.incr(self._zone_count_key(event.track_id, event.zone))
+
+        pipe.execute()
+
+    def get_sequence(self, track_id: int, last_n: Optional[int] = None):
+        """
+        Return a ``TrackSequence`` for the given track.
+
+        Args:
+            track_id: Track identifier.
+            last_n:   If given, return only the most recent *n* events.
+
+        Returns:
+            ``TrackSequence`` (empty if the track has no stored events).
+        """
+        from libs.schemas.memory import TrackEvent, TrackSequence
+
+        key = self._seq_key(track_id)
+        if last_n is not None:
+            raw_list = self._r.lrange(key, -last_n, -1)
+        else:
+            raw_list = self._r.lrange(key, 0, -1)
+
+        events: list[TrackEvent] = []
+        for raw in raw_list:
+            try:
+                data = json.loads(raw if isinstance(raw, str) else raw.decode())
+                events.append(TrackEvent(**data))
+            except Exception:
+                continue
+
+        zones_raw = self._r.smembers(self._zones_key(track_id))
+        zones_visited = [
+            z if isinstance(z, str) else z.decode() for z in zones_raw
+        ]
+        total_dwell = sum(e.dwell_time_seconds for e in events)
+
+        return TrackSequence(
+            track_id=track_id,
+            camera_id=self._camera_id,
+            events=events,
+            zones_visited=zones_visited,
+            total_dwell=total_dwell,
+        )
+
+    def get_zone_entry_count(self, track_id: int, zone: str) -> int:
+        """Return the number of times *track_id* has entered *zone*."""
+        raw = self._r.get(self._zone_count_key(track_id, zone))
+        if raw is None:
+            return 0
+        return int(raw if isinstance(raw, (int, str)) else raw.decode())
+
+    def get_active_track_ids(self, camera_id: str) -> set[int]:
+        """Return the set of track IDs currently marked active for *camera_id*."""
+        key = f"active:{camera_id}"
+        members = self._r.smembers(key)
+        return {int(m if isinstance(m, (int, str)) else m.decode()) for m in members}
+
+    def expire_track(self, track_id: int) -> None:
+        """Remove all stored data for *track_id* and deregister it as active."""
+        pipe = self._r.pipeline()
+        pipe.delete(self._seq_key(track_id))
+        pipe.delete(self._zones_key(track_id))
+        pipe.srem(self._active_key(), str(track_id))
+        pipe.execute()

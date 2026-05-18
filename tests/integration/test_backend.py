@@ -21,10 +21,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -59,15 +58,21 @@ def app_with_redis(fake_redis_client):
 @pytest.fixture()
 def app_without_redis():
     """
-    Return the FastAPI app with Redis forcibly set to None to simulate
-    an unreachable Redis server.
+    Return the FastAPI app with ``_get_redis`` patched to always return
+    None, deterministically simulating an unreachable Redis server.
+
+    Patching the helper directly prevents the lazy-init path from
+    attempting a real Redis connection during tests.
     """
     import apps.backend.main as backend
 
-    original = backend._redis
+    original_get_redis = backend._get_redis
+    original_redis = backend._redis
+    backend._get_redis = lambda: None
     backend._redis = None
     yield backend.app
-    backend._redis = original
+    backend._get_redis = original_get_redis
+    backend._redis = original_redis
 
 
 # ── /health tests ─────────────────────────────────────────────────────────────
