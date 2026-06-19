@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from pathlib import Path
+
 from libs.schemas.detection import DetectionFrameSchema as DetectionFrame, DetectionSchema as Detection, BoundingBox
 from services.detection.zones import get_zones, get_zones_for_point
 from services.reasoning.scene_graph import SceneGraph
@@ -92,10 +94,38 @@ class Detector:
             ...     confidence_threshold=0.5,
             ... )
         """
-        logger.info(f"Loading YOLO model: {model_name} on {device}")
-        self.model = YOLO(model_name)
         self.conf = confidence_threshold
         self.device = device
+        self.model_path = model_name
+
+        if model_name.endswith(".engine"):
+            if "cpu" in str(device).lower():
+                logger.warning("TensorRT engines cannot run on CPU. Falling back to .pt model.")
+                fallback_name = model_name.replace(".engine", ".pt")
+                self.model_path = fallback_name
+            else:
+                try:
+                    logger.info(f"Loading TensorRT Engine: {model_name} on {device}")
+                    self.model = YOLO(model_name, task="detect")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load TensorRT engine: {e}. Triggering automatic fallback...")
+                    fallback_name = model_name.replace(".engine", ".pt")
+                    self.model_path = fallback_name
+
+        elif model_name.endswith(".pt") and "cuda" in str(device).lower():
+            engine_path = model_name.replace(".pt", ".engine")
+            if Path(engine_path).exists():
+                try:
+                    logger.info(f"Auto-promoting to TensorRT Engine: {engine_path}")
+                    self.model = YOLO(engine_path, task="detect")
+                    self.model_path = engine_path
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load auto-promoted engine: {e}. Falling back to baseline.")
+
+        logger.info(f"Loading YOLO model: {self.model_path} on {device}")
+        self.model = YOLO(self.model_path, task="detect")
 
     def detect(self, frame: np.ndarray, frame_id: int = 0) -> DetectionFrameSchema:
         """Run YOLO inference on a single BGR frame.
